@@ -8,6 +8,8 @@ const eventSchema = new mongoose.Schema({
   advance_payment: { type: Number, default: 0 },
   payment_method: { type: String },
   notes: { type: String },
+     // Who actually created the event (could be owner or member)
+    created_by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 }, { timestamps: true });
 
 export default mongoose.model("Event", eventSchema);

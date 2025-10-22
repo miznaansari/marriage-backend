@@ -169,6 +169,7 @@ export const getEvents = async (req, res) => {
  *       400:
  *         description: Validation error
  */
+
 export const createEvent = async (req, res) => {
   try {
     const user = req.user;
@@ -183,11 +184,15 @@ export const createEvent = async (req, res) => {
 
     // ✅ Validation
     if (!event_name || typeof event_name !== "string" || event_name.length > 255) {
-      return res.status(422).json({ error: "event_name is required and must be a string (max 255)" });
+      return res
+        .status(422)
+        .json({ error: "event_name is required and must be a string (max 255)" });
     }
 
     if (!contact_mobile || typeof contact_mobile !== "string" || contact_mobile.length > 20) {
-      return res.status(422).json({ error: "contact_mobile is required and must be a string (max 20)" });
+      return res
+        .status(422)
+        .json({ error: "contact_mobile is required and must be a string (max 20)" });
     }
 
     if (
@@ -195,7 +200,9 @@ export const createEvent = async (req, res) => {
       isNaN(booking_total_value) ||
       Number(booking_total_value) < 0
     ) {
-      return res.status(422).json({ error: "booking_total_value is required and must be >= 0" });
+      return res
+        .status(422)
+        .json({ error: "booking_total_value is required and must be >= 0" });
     }
 
     if (advance_payment && (isNaN(advance_payment) || Number(advance_payment) < 0)) {
@@ -210,15 +217,32 @@ export const createEvent = async (req, res) => {
       return res.status(422).json({ error: "notes must be a string" });
     }
 
+    // ✅ Determine owner (the real event owner)
+    let ownerId = user._id;
+
+    const familyPermission = await FamilyPermission.findOne({ member_id: user._id });
+    if (familyPermission) {
+      ownerId = familyPermission.owner_id;
+    }
+
+    // ✅ Check access
+    const hasWriteAccess = await checkAccess(user._id, ownerId, "write");
+    if (!hasWriteAccess) {
+      return res
+        .status(403)
+        .json({ error: "You do not have permission to create an event (read-only access)" });
+    }
+
     // ✅ Create event
     const event = await Event.create({
-      user_id: user._id,
+      user_id: ownerId,
       event_name,
       contact_mobile,
       booking_total_value,
       advance_payment,
       payment_method,
       notes,
+      created_by: user._id,
     });
 
     // ✅ Create transaction if advance_payment > 0
