@@ -5,8 +5,6 @@ import UserToken from "../models/UserToken.js";
 import { generateToken } from "../utils/jwt.js";
 import nodemailer from "nodemailer";
 import { sendEmail } from "../utils/email.js"; // your email utility
-import { Resend } from "resend";
-const resend = new Resend(process.env.RESEND_API_KEY);
 /**
  * @swagger
  * tags:
@@ -306,20 +304,15 @@ export const verify2FA = async (req, res) => {
  *       200:
  *         description: OTP sent successfully
  */
-
 export const signupRequest = async (req, res) => {
   try {
     const { fullname, email, mobile, password, dob, profile_url } = req.body;
 
     if (!fullname || !password)
-      return res
-        .status(422)
-        .json({ status: false, message: "Name & password required" });
+      return res.status(422).json({ status: false, message: "Name & password required" });
 
     if (!email && !mobile)
-      return res
-        .status(422)
-        .json({ status: false, message: "Either email or mobile required" });
+      return res.status(422).json({ status: false, message: "Either email or mobile required" });
 
     // 🔍 Check if email or mobile already exists
     const existingUser = await User.findOne({
@@ -336,10 +329,9 @@ export const signupRequest = async (req, res) => {
       });
     }
 
-    // Generate OTP
     const otp = Math.floor(100000 + Math.random() * 900000);
 
-    // Hash password before storing in extra_data
+    // hash password before storing in extra_data
     const hashedPassword = await bcrypt.hash(password, 10);
 
     await AccountRecoveryOtp.create({
@@ -351,10 +343,12 @@ export const signupRequest = async (req, res) => {
       extra_data: { fullname, password: hashedPassword, dob, profile_url },
     });
 
-    // Send OTP using Resend
     if (email) {
-      await resend.emails.send({
-        from: "Auth System <onboarding@resend.dev>", // or your verified domain
+      await transporter.verify();
+      console.log("✅ Gmail SMTP ready to send mail");
+
+      await transporter.sendMail({
+        from: `"Auth System" <${process.env.MAIL_USER}>`,
         to: email,
         subject: "Signup OTP",
         text: `Your signup OTP is: ${otp}`,
