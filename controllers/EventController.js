@@ -1,0 +1,439 @@
+import Event from "../models/Event.js";
+import Transaction from "../models/Transaction.js";
+import FamilyPermission from "../models/FamilyPermission.js";
+
+/**
+ * @swagger
+ * tags:
+ *   name: Events
+ *   description: Manage events and payments
+ */
+
+/**
+ * @swagger
+ * components:
+ *   securitySchemes:
+ *     bearerAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: JWT
+ *   schemas:
+ *     Event:
+ *       type: object
+ *       properties:
+ *         _id:
+ *           type: string
+ *         event_name:
+ *           type: string
+ *         contact_mobile:
+ *           type: string
+ *         booking_total_value:
+ *           type: number
+ *         advance_payment:
+ *           type: number
+ *         payment_method:
+ *           type: string
+ *         notes:
+ *           type: string
+ *         user_id:
+ *           type: object
+ *           properties:
+ *             _id:
+ *               type: string
+ *             fullname:
+ *               type: string
+ *             email:
+ *               type: string
+ *     Transaction:
+ *       type: object
+ *       properties:
+ *         _id:
+ *           type: string
+ *         event_id:
+ *           type: string
+ *         added_by:
+ *           type: string
+ *         amount:
+ *           type: number
+ *         payment_method:
+ *           type: string
+ *         reference:
+ *           type: string
+ *         note:
+ *           type: string
+ */
+
+// ✅ Helper: check access
+async function checkAccess(memberId, ownerId, required) {
+  if (memberId.equals(ownerId)) return true;
+
+  const perm = await FamilyPermission.findOne({ owner_id: ownerId, member_id: memberId });
+  if (!perm) return false;
+
+  if (required === "read" && ["read", "write"].includes(perm.permission)) return true;
+  if (required === "write" && perm.permission === "write") return true;
+
+  return false;
+}
+
+/**
+ * @swagger
+ * /api/events:
+ *   get:
+ *     summary: Get all accessible events (own + shared)
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of accessible events
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Event'
+ */
+
+
+export const getEvents = async (req, res) => {
+  try {
+    const user = req.user;
+
+    // Get all owner IDs accessible by this user (including own)
+    const accessibleOwnerIds = await FamilyPermission.find({ member_id: user._id }).distinct("owner_id");
+
+    // Fetch events for the user and shared owners
+    const events = await Event.find({ user_id: { $in: [user._id, ...accessibleOwnerIds] } })
+      .populate("user_id", "fullname email")
+      .sort({ createdAt: -1 })
+      .lean(); // convert to plain JS object so we can attach transactions easily
+
+    // Fetch transactions for all event IDs
+    const eventIds = events.map((e) => e._id);
+    const transactions = await Transaction.find({ event_id: { $in: eventIds } })
+      .populate("added_by", "fullname email")
+      .sort({ createdAt: 1 })
+      .lean();
+
+    // Attach transactions to their respective events
+    const eventsWithTransactions = events.map((event) => ({
+      ...event,
+      transactions: transactions.filter((t) => t.event_id.toString() === event._id.toString()),
+    }));
+
+    res.json(eventsWithTransactions);
+  } catch (err) {
+    console.error("Error in getEvents:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+
+/**
+ * @swagger
+ * /api/events:
+ *   post:
+ *     summary: Create a new event
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - event_name
+ *             properties:
+ *               event_name:
+ *                 type: string
+ *               contact_mobile:
+ *                 type: string
+ *               booking_total_value:
+ *                 type: number
+ *               advance_payment:
+ *                 type: number
+ *               payment_method:
+ *                 type: string
+ *               notes:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Event created successfully
+ *       400:
+ *         description: Validation error
+ */
+export const createEvent = async (req, res) => {
+  try {
+    const user = req.user;
+    const {
+      event_name,
+      contact_mobile,
+      booking_total_value,
+      advance_payment = 0,
+      payment_method = null,
+      notes = null,
+    } = req.body;
+
+    // ✅ Validation
+    if (!event_name || typeof event_name !== "string" || event_name.length > 255) {
+      return res.status(422).json({ error: "event_name is required and must be a string (max 255)" });
+    }
+
+    if (!contact_mobile || typeof contact_mobile !== "string" || contact_mobile.length > 20) {
+      return res.status(422).json({ error: "contact_mobile is required and must be a string (max 20)" });
+    }
+
+    if (
+      booking_total_value === undefined ||
+      isNaN(booking_total_value) ||
+      Number(booking_total_value) < 0
+    ) {
+      return res.status(422).json({ error: "booking_total_value is required and must be >= 0" });
+    }
+
+    if (advance_payment && (isNaN(advance_payment) || Number(advance_payment) < 0)) {
+      return res.status(422).json({ error: "advance_payment must be >= 0" });
+    }
+
+    if (payment_method && typeof payment_method !== "string") {
+      return res.status(422).json({ error: "payment_method must be a string" });
+    }
+
+    if (notes && typeof notes !== "string") {
+      return res.status(422).json({ error: "notes must be a string" });
+    }
+
+    // ✅ Create event
+    const event = await Event.create({
+      user_id: user._id,
+      event_name,
+      contact_mobile,
+      booking_total_value,
+      advance_payment,
+      payment_method,
+      notes,
+    });
+
+    // ✅ Create transaction if advance_payment > 0
+    if (advance_payment > 0) {
+      await Transaction.create({
+        event_id: event._id,
+        amount: advance_payment,
+        payment_method,
+        note: "Advance payment (initial)",
+        added_by: user._id,
+      });
+    }
+
+    res.status(201).json(event);
+  } catch (err) {
+    console.error("Error creating event:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+/**
+ * @swagger
+ * /api/events/{id}:
+ *   get:
+ *     summary: Get a single event with transactions
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Event ID
+ *     responses:
+ *       200:
+ *         description: Event details with transactions
+ *       403:
+ *         description: Permission denied
+ *       404:
+ *         description: Event not found
+ */
+export const getEventById = async (req, res) => {
+  try {
+    const user = req.user;
+    const event = await Event.findById(req.params.id).populate("user_id");
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    const canAccess = await checkAccess(user._id, event.user_id._id, "read");
+    if (!canAccess) return res.status(403).json({ error: "Permission denied" });
+
+    const transactions = await Transaction.find({ event_id: event._id, deleted_at: null });
+    res.json({ ...event.toObject(), transactions });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * @swagger
+ * /api/events/{id}:
+ *   put:
+ *     summary: Update an event
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Event ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               event_name:
+ *                 type: string
+ *               contact_mobile:
+ *                 type: string
+ *               booking_total_value:
+ *                 type: number
+ *               advance_payment:
+ *                 type: number
+ *               payment_method:
+ *                 type: string
+ *               notes:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Event updated
+ *       403:
+ *         description: Permission denied
+ *       404:
+ *         description: Event not found
+ */
+export const updateEvent = async (req, res) => {
+  try {
+    const user = req.user;
+    const event = await Event.findById(req.params.id);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    const canEdit = await checkAccess(user._id, event.user_id, "write");
+    if (!canEdit) return res.status(403).json({ error: "Permission denied" });
+
+    Object.assign(event, req.body);
+    await event.save();
+
+    res.json({ message: "Event updated", event });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+/**
+ * @swagger
+ * /api/events/{id}:
+ *   delete:
+ *     summary: Delete an event
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Event ID
+ *     responses:
+ *       200:
+ *         description: Event deleted
+ *       403:
+ *         description: Permission denied
+ *       404:
+ *         description: Event not found
+ */
+export const deleteEvent = async (req, res) => {
+  try {
+    const user = req.user;
+    const event = await Event.findById(req.params.id);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    const canDelete = await checkAccess(user._id, event.user_id, "write");
+    if (!canDelete) return res.status(403).json({ error: "Permission denied" });
+
+    await event.deleteOne();
+    res.json({ message: "Event deleted" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * @swagger
+ * /api/events/{id}/payments:
+ *   post:
+ *     summary: Add a payment to an event
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Event ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               amount:
+ *                 type: number
+ *               payment_method:
+ *                 type: string
+ *               reference:
+ *                 type: string
+ *               note:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Payment added successfully
+ *       403:
+ *         description: Permission denied
+ *       404:
+ *         description: Event not found
+ */
+export const addPayment = async (req, res) => {
+  try {
+    const user = req.user;
+    const { amount, payment_method, reference, note } = req.body;
+
+    const event = await Event.findById(req.params.id);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    const canAdd = await checkAccess(user._id, event.user_id, "write");
+    if (!canAdd) return res.status(403).json({ error: "Permission denied" });
+
+    const transaction = await Transaction.create({
+      event_id: event._id,
+      added_by: user._id,
+      amount,
+      payment_method,
+      reference,
+      note,
+    });
+
+    res.status(201).json(transaction);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+
