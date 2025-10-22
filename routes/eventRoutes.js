@@ -6,6 +6,7 @@ import {
   updateEvent,
   deleteEvent,
   addPayment,
+  updatePayment
 } from "../controllers/EventController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 import {
@@ -28,8 +29,8 @@ router.post("/events/:id/payments", authMiddleware, addPayment);
 
 // 🔹 Family routes
 router.post("/family/share", authMiddleware, giveFamilyAccess);
-router.get("/family/permissions/:id", authMiddleware, fetchFamilyPermissions);
+router.get("/family/", authMiddleware, fetchFamilyPermissions);
 router.put("/family/permissions/:id", authMiddleware, editFamilyPermission);
 // router.get("/events/:id/payments", payments); // if you create a `payments` method later
-
+router.put("/events/:id/payments/:paymentId", authMiddleware, updatePayment);
 export default router;

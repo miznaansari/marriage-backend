@@ -95,7 +95,6 @@ async function checkAccess(memberId, ownerId, required) {
  *                 $ref: '#/components/schemas/Event'
  */
 
-
 export const getEvents = async (req, res) => {
   try {
     const user = req.user;
@@ -109,9 +108,12 @@ export const getEvents = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean(); // convert to plain JS object so we can attach transactions easily
 
-    // Fetch transactions for all event IDs
+    // Fetch transactions for all event IDs, excluding soft-deleted ones
     const eventIds = events.map((e) => e._id);
-    const transactions = await Transaction.find({ event_id: { $in: eventIds } })
+    const transactions = await Transaction.find({ 
+        event_id: { $in: eventIds },
+        deleted_at: null // only include transactions that are NOT soft-deleted
+      })
       .populate("added_by", "fullname email")
       .sort({ createdAt: 1 })
       .lean();
@@ -128,6 +130,8 @@ export const getEvents = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+
 
 
 /**
@@ -433,6 +437,146 @@ export const addPayment = async (req, res) => {
     res.status(201).json(transaction);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+};
+
+/**
+ * @swagger
+ * /api/events/{id}/payments/{paymentId}:
+ *   put:
+ *     summary: Update a transaction (soft delete old + create new)
+ *     tags:
+ *       - Events
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Event ID
+ *       - in: path
+ *         name: paymentId
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Payment (transaction) ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               amount:
+ *                 type: number
+ *                 format: float
+ *                 description: Updated payment amount
+ *               payment_method:
+ *                 type: string
+ *                 description: Updated payment method
+ *               reference:
+ *                 type: string
+ *                 description: Updated reference note
+ *               note:
+ *                 type: string
+ *                 description: Updated note
+ *             example:
+ *               amount: 1200.50
+ *               payment_method: "UPI"
+ *               reference: "Payment corrected"
+ *               note: "Updated payment after verification"
+ *     responses:
+ *       200:
+ *         description: Old transaction soft deleted and new transaction created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 new_transaction:
+ *                   type: object
+ *                   properties:
+ *                     _id:
+ *                       type: string
+ *                     event_id:
+ *                       type: string
+ *                     added_by:
+ *                       type: string
+ *                     amount:
+ *                       type: number
+ *                     payment_method:
+ *                       type: string
+ *                     reference:
+ *                       type: string
+ *                     note:
+ *                       type: string
+ *                     createdAt:
+ *                       type: string
+ *                       format: date-time
+ *                     updatedAt:
+ *                       type: string
+ *                       format: date-time
+ *       403:
+ *         description: Permission denied
+ *       404:
+ *         description: Event or Transaction not found
+ *       400:
+ *         description: Bad request / validation error
+ */
+
+export const updatePayment = async (req, res) => {
+  try {
+    const user = req.user; // from auth middleware
+    const { amount, payment_method, reference, note } = req.body;
+    const { id: eventId, paymentId } = req.params;
+
+    // ✅ Fetch event
+    const event = await Event.findById(eventId);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    // ✅ Check write permission
+    const canUpdate = await checkAccess(user._id, event.user_id, "write");
+    if (!canUpdate) return res.status(403).json({ error: "Permission denied" });
+
+    // ✅ Find existing transaction
+    const transaction = await Transaction.findOne({
+      _id: paymentId,
+      event_id: eventId,
+    });
+    if (!transaction) return res.status(404).json({ error: "Transaction not found" });
+
+    // ✅ Soft delete old transaction by setting deleted_at
+    transaction.deleted_at = new Date();
+    const deleteReason = `Soft deleted because user requested update at ${transaction.deleted_at.toLocaleString()}`;
+    transaction.reference = transaction.reference
+      ? `${transaction.reference} | ${deleteReason}`
+      : deleteReason;
+    await transaction.save();
+
+    // ✅ Create new transaction and link old transaction
+    const newTransaction = await Transaction.create({
+      event_id: eventId,
+      added_by: user._id,
+      amount: amount ?? transaction.amount,
+      payment_method: payment_method ?? transaction.payment_method,
+      note: note ?? transaction.note,
+      reference: reference
+        ? `${reference} | Soft deleted transaction id: ${transaction._id}`
+        : `Soft deleted transaction id: ${transaction._id}`,
+      old_transaction_id: transaction._id, // Optional: keep track of the original transaction
+    });
+
+    return res.status(200).json({
+      message: "Transaction updated: old transaction soft deleted, new one created.",
+      new_transaction: newTransaction,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(400).json({ error: err.message });
   }
 };
 
