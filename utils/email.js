@@ -2,13 +2,16 @@ import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 dotenv.config();
 
-// Create reusable transporter object using Gmail SMTP
+// Create transporter using Gmail SMTP
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,        // 465 for SSL, 587 for TLS
+  secure: true,     // true for 465, false for 587
   auth: {
-    user: process.env.MAIL_USER, // your Gmail address
-    pass: process.env.MAIL_PASS, // your Gmail app password
+    user: process.env.MAIL_USER, // Gmail address
+    pass: process.env.MAIL_PASS, // Gmail App Password
   },
+  connectionTimeout: 20000, // 20 seconds timeout
 });
 
 /**
@@ -30,8 +33,8 @@ export const sendEmail = async (to, subject, text) => {
       text,
     };
 
-    await transporter.sendMail(mailOptions);
-    console.log(`📧 Email sent to ${to} with subject "${subject}"`);
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`📧 Email sent: ${info.messageId}`);
   } catch (err) {
     console.error("❌ Error sending email:", err);
     throw err;
