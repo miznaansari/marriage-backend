@@ -1,7 +1,7 @@
 import Event from "../models/Event.js";
 import Transaction from "../models/Transaction.js";
 import FamilyPermission from "../models/FamilyPermission.js";
-
+import Category from "../models/Category.js";
 /**
  * @swagger
  * tags:
@@ -94,34 +94,43 @@ async function checkAccess(memberId, ownerId, required) {
  *               items:
  *                 $ref: '#/components/schemas/Event'
  */
-
 export const getEvents = async (req, res) => {
   try {
     const user = req.user;
 
-    // Get all owner IDs accessible by this user (including own)
+    // ✅ Get all owner IDs accessible by this user (including their own)
     const accessibleOwnerIds = await FamilyPermission.find({ member_id: user._id }).distinct("owner_id");
 
-    // Fetch events for the user and shared owners
-    const events = await Event.find({ user_id: { $in: [user._id, ...accessibleOwnerIds] } })
+    // ✅ Fetch events for this user and shared owners
+    const events = await Event.find({
+      user_id: { $in: [user._id, ...accessibleOwnerIds] },
+      is_deleted: false, // exclude soft-deleted events
+    })
       .populate("user_id", "fullname email")
+      .populate("category_id", "name status") // ✅ include category name & status
       .sort({ createdAt: -1 })
-      .lean(); // convert to plain JS object so we can attach transactions easily
+      .lean(); // convert to plain JS objects
 
-    // Fetch transactions for all event IDs, excluding soft-deleted ones
+    // ✅ Get all event IDs
     const eventIds = events.map((e) => e._id);
-    const transactions = await Transaction.find({ 
-        event_id: { $in: eventIds },
-        deleted_at: null // only include transactions that are NOT soft-deleted
-      })
+
+    // ✅ Fetch related transactions (exclude soft-deleted)
+    const transactions = await Transaction.find({
+      event_id: { $in: eventIds },
+      deleted_at: null,
+    })
       .populate("added_by", "fullname email")
       .sort({ createdAt: 1 })
       .lean();
 
-    // Attach transactions to their respective events
+    // ✅ Attach transactions + category name
     const eventsWithTransactions = events.map((event) => ({
       ...event,
-      transactions: transactions.filter((t) => t.event_id.toString() === event._id.toString()),
+      category_name: event.category_id?.name || null, // ✅ Add readable category name
+      category_status: event.category_id?.status ?? null, // optional if you need
+      transactions: transactions.filter(
+        (t) => t.event_id.toString() === event._id.toString()
+      ),
     }));
 
     res.json(eventsWithTransactions);
@@ -138,7 +147,7 @@ export const getEvents = async (req, res) => {
  * @swagger
  * /api/events:
  *   post:
- *     summary: Create a new event
+ *     summary: Create a new event (with category auto-create)
  *     tags: [Events]
  *     security:
  *       - bearerAuth: []
@@ -150,6 +159,7 @@ export const getEvents = async (req, res) => {
  *             type: object
  *             required:
  *               - event_name
+ *               - category_name
  *             properties:
  *               event_name:
  *                 type: string
@@ -163,6 +173,9 @@ export const getEvents = async (req, res) => {
  *                 type: string
  *               notes:
  *                 type: string
+ *               category_name:
+ *                 type: string
+ *                 description: Name of the category (e.g. "Home Care")
  *     responses:
  *       201:
  *         description: Event created successfully
@@ -180,6 +193,7 @@ export const createEvent = async (req, res) => {
       advance_payment = 0,
       payment_method = null,
       notes = null,
+      category_name,
     } = req.body;
 
     // ✅ Validation
@@ -217,15 +231,20 @@ export const createEvent = async (req, res) => {
       return res.status(422).json({ error: "notes must be a string" });
     }
 
-    // ✅ Determine owner (the real event owner)
-    let ownerId = user._id;
+    if (!category_name || typeof category_name !== "string") {
+      return res
+        .status(422)
+        .json({ error: "category_name is required and must be a string" });
+    }
 
+    // ✅ Determine event owner (if member, use owner's ID)
+    let ownerId = user._id;
     const familyPermission = await FamilyPermission.findOne({ member_id: user._id });
     if (familyPermission) {
       ownerId = familyPermission.owner_id;
     }
 
-    // ✅ Check access
+    // ✅ Access check
     const hasWriteAccess = await checkAccess(user._id, ownerId, "write");
     if (!hasWriteAccess) {
       return res
@@ -233,7 +252,21 @@ export const createEvent = async (req, res) => {
         .json({ error: "You do not have permission to create an event (read-only access)" });
     }
 
-    // ✅ Create event
+    // ✅ Find or Create Category
+    let category = await Category.findOne({
+      name: category_name.trim(),
+      is_deleted: false,
+    });
+
+    if (!category) {
+      category = await Category.create({
+        name: category_name.trim(),
+        status: 1,
+        is_deleted: false,
+      });
+    }
+
+    // ✅ Create Event
     const event = await Event.create({
       user_id: ownerId,
       event_name,
@@ -242,10 +275,11 @@ export const createEvent = async (req, res) => {
       advance_payment,
       payment_method,
       notes,
+      category_id: category._id,
       created_by: user._id,
     });
 
-    // ✅ Create transaction if advance_payment > 0
+    // ✅ Create Transaction if advance_payment > 0
     if (advance_payment > 0) {
       await Transaction.create({
         event_id: event._id,
@@ -256,7 +290,11 @@ export const createEvent = async (req, res) => {
       });
     }
 
-    res.status(201).json(event);
+    res.status(201).json({
+      message: "Event created successfully",
+      event,
+      category: category.name,
+    });
   } catch (err) {
     console.error("Error creating event:", err);
     res.status(500).json({ error: "Server error" });
@@ -388,15 +426,217 @@ export const deleteEvent = async (req, res) => {
   try {
     const user = req.user;
     const event = await Event.findById(req.params.id);
-    if (!event) return res.status(404).json({ error: "Event not found" });
 
+    if (!event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    // ✅ Check permission
     const canDelete = await checkAccess(user._id, event.user_id, "write");
-    if (!canDelete) return res.status(403).json({ error: "Permission denied" });
+    if (!canDelete) {
+      return res.status(403).json({ error: "Permission denied" });
+    }
 
-    await event.deleteOne();
-    res.json({ message: "Event deleted" });
+    // ✅ Soft delete instead of actual delete
+    if (event.is_deleted) {
+      return res.status(400).json({ error: "Event already deleted" });
+    }
+
+    event.is_deleted = true;
+    event.deleted_at = new Date();
+    await event.save();
+
+    res.json({ message: "Event soft deleted successfully" });
   } catch (err) {
+    console.error("Error deleting event:", err);
     res.status(500).json({ error: err.message });
+  }
+};
+
+
+
+/**
+ * @swagger
+ * /api/categories:
+ *   get:
+ *     summary: Get list of all categories
+ *     tags: [Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     description: Retrieve all active (non-deleted) categories sorted by creation date (newest first).
+ *     responses:
+ *       200:
+ *         description: List of categories retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 count:
+ *                   type: number
+ *                   example: 2
+ *                 categories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       _id:
+ *                         type: string
+ *                         example: "6719e3b21a8c2e0b6c9b12f5"
+ *                       name:
+ *                         type: string
+ *                         example: "Home Care"
+ *                       icon:
+ *                         type: string
+ *                         nullable: true
+ *                         example: "https://cdn.example.com/icons/home.png"
+ *                       status:
+ *                         type: number
+ *                         description: 0 = inactive, 1 = active, 2 = archived
+ *                         example: 1
+ *                       createdAt:
+ *                         type: string
+ *                         format: date-time
+ *                         example: "2025-10-23T05:45:00.000Z"
+ *       500:
+ *         description: Server error
+ */
+
+export const getCategories = async (req, res) => {
+  try {
+    // ✅ Fetch all non-deleted categories (default filter already applies from schema)
+    const categories = await Category.find()
+      .sort({ createdAt: -1 }) // newest first
+      .lean(); // plain JS objects
+
+    res.json({
+      success: true,
+      count: categories.length,
+      categories: categories.map((cat) => ({
+        _id: cat._id,
+        name: cat.name,
+        icon: cat.icon,
+        status: cat.status,
+        createdAt: cat.createdAt,
+      })),
+    });
+  } catch (err) {
+    console.error("Error fetching categories:", err);
+    res.status(500).json({ success: false, error: "Server error" });
+  }
+};
+
+/**
+ * @swagger
+ * /api/search-categories:
+ *   get:
+ *     summary: Get list of categories with optional filters
+ *     tags: [Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search categories by name (case-insensitive, partial match)
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: integer
+ *           enum: [0, 1, 2]
+ *         description: Filter by category status (0=inactive,1=active,2=archived)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Maximum number of categories to return
+ *     responses:
+ *       200:
+ *         description: List of categories retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 count:
+ *                   type: integer
+ *                   example: 10
+ *                 categories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       _id:
+ *                         type: string
+ *                         example: "6719e3b21a8c2e0b6c9b12f5"
+ *                       name:
+ *                         type: string
+ *                         example: "Home Care"
+ *                       icon:
+ *                         type: string
+ *                         nullable: true
+ *                         example: "https://cdn.example.com/icons/home.png"
+ *                       status:
+ *                         type: integer
+ *                         description: 0=inactive,1=active,2=archived
+ *                         example: 1
+ *                       createdAt:
+ *                         type: string
+ *                         format: date-time
+ *                         example: "2025-10-23T05:45:00.000Z"
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 error:
+ *                   type: string
+ *                   example: "Server error"
+ */
+
+export const getSearcCategories = async (req, res) => {
+  try {
+    const { search = "", status, limit = 20 } = req.query;
+
+    const query = { is_deleted: false };
+
+    // Filter by status if provided
+    if (status !== undefined) {
+      query.status = Number(status);
+    }
+
+    // Search by name (case-insensitive, partial match)
+    if (search) {
+      query.name = { $regex: search, $options: "i" };
+    }
+
+    // Fetch categories with limit & newest first
+    const categories = await Category.find(query)
+      .sort({ createdAt: -1 })
+      .limit(Number(limit))
+      .lean();
+
+    res.json({
+      success: true,
+      count: categories.length,
+      categories
+    });
+  } catch (err) {
+    console.error("Error fetching categories:", err);
+    res.status(500).json({ success: false, error: "Server error" });
   }
 };
 

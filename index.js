@@ -18,7 +18,7 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
-mongoose.connect(process.env.MONGO_URI, { dbName: "auth_demo" })
+mongoose.connect(process.env.MONGO_URI, { dbName: "test-marriage" })
   .then(() => console.log("✅ MongoDB connected"))
   .catch(console.error);
 

@@ -6,7 +6,9 @@ import {
   updateEvent,
   deleteEvent,
   addPayment,
-  updatePayment
+  updatePayment,
+  getCategories,
+  getSearcCategories
 } from "../controllers/EventController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 import {
@@ -19,6 +21,9 @@ const router = express.Router();
 
 // 🔹 Events
 router.get("/events", authMiddleware, getEvents);
+router.get("/categories", authMiddleware, getCategories);
+router.get("/search-categories", authMiddleware, getSearcCategories);
+
 router.post("/events", authMiddleware, createEvent);
 router.get("/events/:id", authMiddleware, getEventById);
 router.put("/events/:id", authMiddleware, updateEvent);
