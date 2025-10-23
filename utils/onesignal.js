@@ -5,8 +5,6 @@ dotenv.config();
 import OneSignalPkg from "@onesignal/node-onesignal";
 const { createConfiguration, DefaultApi } = OneSignalPkg;
 
-console.log("OneSignal App ID:", process.env.ONESIGNAL_APP_ID);
-console.log("OneSignal API Key:", process.env.ONESIGNAL_APP_KEY);
 
 // ✅ Ensure .env values exist
 if (!process.env.ONESIGNAL_APP_ID || !process.env.ONESIGNAL_APP_KEY) {

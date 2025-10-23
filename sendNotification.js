@@ -1,7 +1,6 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
-console.log('API Key:', process.env.ONESIGNAL_APP_KEY);
-console.log('App ID:', process.env.ONESIGNAL_APP_ID);
+
 import OneSignalPkg from '@onesignal/node-onesignal';
 const { createConfiguration, DefaultApi, Notification } = OneSignalPkg;
 
