@@ -413,7 +413,7 @@ export const signupVerifyOtp = async (req, res) => {
         const user = await User.create({
             fullname: data.fullname,
             email: isEmail ? identifier : null,
-            mobile: !isEmail ? identifier : null,
+            // mobile: !isEmail ? identifier : null,
             password: data.password,
             dob: data.dob ?? null,
             profile_url: data.profile_url ?? null,
