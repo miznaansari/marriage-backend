@@ -389,8 +389,7 @@ export const createEvent = async (req, res) => {
  *         description: Access denied
  *       404:
  *         description: Event not found
- */
-export const updateEventStatusPriority = async (req, res) => {
+ */export const updateEventStatusPriority = async (req, res) => {
   try {
     const user = req.user;
     const { id } = req.params;
@@ -443,9 +442,117 @@ export const updateEventStatusPriority = async (req, res) => {
     event.updated_by = user._id; // optional audit
     await event.save();
 
+    // -------------------------------
+    // 🔔 OneSignal Notification Setup
+    // -------------------------------
+ const messageParts = [];
+
+// Map numeric status to text
+const statusMap = {
+  0: "inactive",
+  1: "pending",
+  2: "completed",
+};
+
+// Add status part
+if (status !== undefined) {
+  const statusText = statusMap[status] || status;
+  if (status === 2) {
+    messageParts.push(`completed the event`);
+  } else if (status === 1) {
+    messageParts.push(`marked as pending`);
+  } else if (status === 0) {
+    messageParts.push(`set to inactive`);
+  } else {
+    messageParts.push(`status updated to ${statusText}`);
+  }
+}
+
+// Add priority part
+if (priority !== undefined) {
+  messageParts.push(`priority set to ${priority}`);
+}
+
+// Final message
+const message = `${user.fullname} ${event.event_name}: ${messageParts.join(", ")}.`;
+    // Find all users who should get the notification
+    const familyMembers = await FamilyPermission.find({
+      owner_id: event.user_id,
+      permission: { $in: ["owner", "write"] },
+    }).select("member_id");
+
+    // Combine owner + permitted members
+    const userIdsToNotify = [
+      event.user_id.toString(),
+      ...familyMembers.map((f) => f.member_id.toString()),
+    ];
+
+    // Remove duplicates AND exclude the current user
+    const uniqueUserIds = [...new Set(userIdsToNotify)].filter(
+      (uid) => uid !== user._id.toString()
+    );
+
+    console.log("Users to notify (excluding sender):", uniqueUserIds);
+
+    // Store notifications in DB
+    await NotificationModel.insertMany(
+      uniqueUserIds.map((uid) => ({
+        user_id: uid,
+        title: "Event Updated",
+        message,
+      }))
+    );
+
+    // Send OneSignal notification
+    try {
+
+      const notification = new Notification();
+      notification.app_id = process.env.ONESIGNAL_APP_ID;
+      notification.headings = { en: "Event Status Changes" };
+      notification.contents = { en: message };
+      notification.include_aliases = {
+        external_id: uniqueUserIds  // array of user IDs
+      };
+      notification.target_channel = "push";  // REQUIRED when using include_aliases
+
+      try {
+        const response = await oneSignalClient.createNotification(notification);
+
+        console.log("✅ Notification ID:", response.id);
+        console.log("📊 Recipients:", response.recipients || 0);
+
+        // If you have errors in the response
+        if (response.errors) {
+          console.log("❌ Errors:", response.errors);
+        }
+
+        // To get detailed delivery stats, use View Message API
+        // Wait a few seconds for processing, then:
+        // GET https://onesignal.com/api/v1/notifications/{response.id}?app_id={YOUR_APP_ID}
+
+      } catch (error) {
+        console.error("❌ Failed to send:", error);
+      }
+
+      return res.status(201).json({
+        transaction,
+        notified_users: uniqueUserIds,
+        message: `Payment added & notifications sent successfully.`,
+      });
+    } catch (err) {
+      console.error("❌ OneSignal error:", err.response?.body || err.message);
+      return res.status(201).json({
+        event,
+        notified_users: uniqueUserIds,
+        message: `Payment added but OneSignal notification failed.`,
+      });
+    }
+
+    // -------------------------------
     res.status(200).json({
-      message: "Event updated successfully",
+      message: "Event updated successfully & notifications sent",
       event,
+      notified_users: uniqueUserIds,
     });
   } catch (error) {
     console.error("Error updating event:", error);
@@ -1144,4 +1251,84 @@ export const updatePayment = async (req, res) => {
   }
 };
 
+/**
+ * @swagger
+ * /api/events/{id}/payments/{paymentId}:
+ *   delete:
+ *     summary: Soft delete a transaction
+ *     tags:
+ *       - Events
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Event ID
+ *       - in: path
+ *         name: paymentId
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Payment (transaction) ID
+ *     responses:
+ *       200:
+ *         description: Transaction soft deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 deleted_transaction:
+ *                   type: object
+ *       403:
+ *         description: Permission denied
+ *       404:
+ *         description: Event or Transaction not found
+ *       400:
+ *         description: Bad request
+ */
+
+export const deletePayment = async (req, res) => {
+  try {
+    const user = req.user; // from auth middleware
+    const { id: eventId, paymentId } = req.params;
+
+    // 1️⃣ Fetch event
+    const event = await Event.findById(eventId);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    // 2️⃣ Check write permission
+    const canDelete = await checkAccess(user._id, event.user_id, "write");
+    if (!canDelete) return res.status(403).json({ error: "Permission denied" });
+
+    // 3️⃣ Find transaction
+    const transaction = await Transaction.findOne({
+      _id: paymentId,
+      event_id: eventId,
+    });
+    if (!transaction) return res.status(404).json({ error: "Transaction not found" });
+
+    // 4️⃣ Soft delete by setting deleted_at and updating reference
+    transaction.deleted_at = new Date();
+    const deleteReason = `Soft deleted by user at ${transaction.deleted_at.toLocaleString()}`;
+    transaction.reference = transaction.reference
+      ? `${transaction.reference} | ${deleteReason}`
+      : deleteReason;
+
+    await transaction.save();
+
+    return res.status(200).json({
+      message: "Transaction soft deleted successfully.",
+      deleted_transaction: transaction,
+    });
+  } catch (err) {
+    console.error("❌ deletePayment Error:", err);
+    return res.status(400).json({ error: err.message });
+  }
+};
 

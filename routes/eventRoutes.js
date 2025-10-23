@@ -9,7 +9,7 @@ import {
   updatePayment,
   getCategories,
   getSearcCategories,
-  updateEventStatusPriority
+  updateEventStatusPriority,deletePayment
 } from "../controllers/EventController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 import {
@@ -24,6 +24,8 @@ const router = express.Router();
 router.get("/events", authMiddleware, getEvents);
 router.get("/categories", authMiddleware, getCategories);
 router.get("/search-categories", authMiddleware, getSearcCategories);
+
+router.delete("/events/:id/payments/:paymentId", authMiddleware, deletePayment);
 router.put("/events/:id/update", authMiddleware, updateEventStatusPriority);
 router.post("/events", authMiddleware, createEvent);
 router.get("/events/:id", authMiddleware, getEventById);

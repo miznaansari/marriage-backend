@@ -195,56 +195,83 @@ export const signup = async (req, res) => {
  *       403:
  *         description: Account locked
  */
+
+import FamilyPermission from "../models/FamilyPermission.js";
+
+
 export const login = async (req, res) => {
-  const { email, password } = req.body;
-  const user = await User.findOne({ email });
-  if (!user)
-    return res.status(401).json({ status: false, message: "Invalid credentials" });
+  try {
+    const { email, password } = req.body;
 
-  if (user.isLocked()) {
-    return res.status(403).json({
-      status: false,
-      message: `Account is locked. Try again after ${user.locked_until}`,
-    });
-  }
+    // ✅ Find user
+    const user = await User.findOne({ email });
+    if (!user)
+      return res.status(401).json({ status: false, message: "Invalid credentials" });
 
-  const valid = await user.checkPassword(password);
-  if (!valid) {
-    await user.registerFailedLogin();
-    return res.status(401).json({ status: false, message: "Invalid credentials" });
-  }
+    // ✅ Check account lock
+    if (user.isLocked()) {
+      return res.status(403).json({
+        status: false,
+        message: `Account is locked. Try again after ${user.locked_until}`,
+      });
+    }
 
-  await user.resetFailedLogins();
+    // ✅ Check password
+    const valid = await user.checkPassword(password);
+    if (!valid) {
+      await user.registerFailedLogin();
+      return res.status(401).json({ status: false, message: "Invalid credentials" });
+    }
 
-  // ✅ Handle 2FA
-  if (user.two_factor_enabled) {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    await AccountRecoveryOtp.create({
-      identifier: user.email,
-      otp,
-      method: "email",
-      purpose: "2fa",
-      expires_at: new Date(Date.now() + 10 * 60 * 1000),
-    });
-    await sendOtp("email", user.email, otp);
+    await user.resetFailedLogins();
+
+    // ✅ Handle 2FA
+    if (user.two_factor_enabled) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      await AccountRecoveryOtp.create({
+        identifier: user.email,
+        otp,
+        method: "email",
+        purpose: "2fa",
+        expires_at: new Date(Date.now() + 10 * 60 * 1000), // 10 mins
+      });
+      await sendOtp("email", user.email, otp);
+
+      return res.json({
+        status: true,
+        message: "Two-factor OTP sent",
+        "2fa_required": true,
+        user_id: user._id,
+      });
+    }
+
+    // ✅ Generate JWT token
+    const token = generateToken(user);
+    await UserToken.create({ user_id: user._id, token });
+
+    // ✅ Determine effective permission
+    let permission = "read"; // default
+
+    const ownerExists = await FamilyPermission.exists({ owner_id: user._id });
+    if (ownerExists) {
+      permission = "owner";
+    } else {
+      const memberPerm = await FamilyPermission.findOne({ member_id: user._id }).select("permission");
+      if (memberPerm) permission = memberPerm.permission; // "write" or "read"
+    }
+
+    // ✅ Return response
     return res.json({
       status: true,
-      message: "Two-factor OTP sent",
-      "2fa_required": true,
-      user_id: user._id, // ✅ Add user_id even for 2FA scenario (optional)
+      token,
+      user_id: user._id,
+      expires_in: 2592000, // 30 days
+      permission,          // "owner" | "write" | "read"
     });
+  } catch (err) {
+    console.error("Login error:", err);
+    return res.status(500).json({ status: false, message: "Server error" });
   }
-
-  // ✅ Generate token and include user ID
-  const token = generateToken(user);
-  await UserToken.create({ user_id: user._id, token });
-
-  res.json({
-    status: true,
-    token,
-    user_id: user._id, // ✅ Added user ID here
-    expires_in: 2592000,
-  });
 };
 
 
