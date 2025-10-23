@@ -45,14 +45,23 @@ export const giveFamilyAccess = async (req, res) => {
     if (!member_email || !permission)
       return res.status(400).json({ error: "member_email and permission are required" });
 
-    if (!["read", "write"].includes(permission))
+    // ✅ Allow 'owner' as valid permission
+    if (!["read", "write", "owner"].includes(permission))
       return res.status(400).json({ error: "Invalid permission value" });
 
+    // ✅ Prevent giving access to yourself
     if (member_email === user.email)
       return res.status(422).json({ error: "You cannot grant access to yourself" });
 
     const member = await User.findOne({ email: member_email });
     if (!member) return res.status(404).json({ error: "Member not found" });
+
+    // ✅ If permission is 'owner', consider adding logic to transfer ownership (optional)
+    if (permission === "owner") {
+      // Example logic (optional):
+      // await FamilyPermission.deleteMany({ owner_id: member._id });
+      // Or just allow multiple owners — depends on your business rule
+    }
 
     await FamilyPermission.findOneAndUpdate(
       { owner_id: user._id, member_id: member._id },
@@ -60,12 +69,13 @@ export const giveFamilyAccess = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    res.json({ message: "Family member access granted successfully" });
+    res.json({ message: `Family member access (${permission}) granted successfully` });
   } catch (err) {
     console.error("Error in giveFamilyAccess:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
+
 
 /**
  * @swagger
@@ -161,26 +171,32 @@ export const editFamilyPermission = async (req, res) => {
     const { id } = req.params;
     const { permission } = req.body;
 
-    if (!["read", "write"].includes(permission))
+    // ✅ Allow read, write, and owner
+    if (!["read", "write", "owner"].includes(permission))
       return res.status(400).json({ error: "Invalid permission" });
 
+    // ✅ Ensure the logged-in user is the real owner of this permission record
     const perm = await FamilyPermission.findOne({
       _id: id,
       owner_id: user._id,
     });
 
     if (!perm)
-      return res.status(404).json({ error: "Family permission not found or not yours" });
+      return res
+        .status(404)
+        .json({ error: "Family permission not found or not owned by you" });
 
+    // ✅ Update permission
     perm.permission = permission;
     await perm.save();
 
-    res.json({ message: "Family member permission updated successfully" });
+    res.json({ message: `Family member permission updated to '${permission}' successfully` });
   } catch (err) {
     console.error("Error in editFamilyPermission:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
+
 
 /**
  * @swagger

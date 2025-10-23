@@ -2,6 +2,10 @@ import Event from "../models/Event.js";
 import Transaction from "../models/Transaction.js";
 import FamilyPermission from "../models/FamilyPermission.js";
 import Category from "../models/Category.js";
+import OneSignalPkg from "@onesignal/node-onesignal";
+import { oneSignalClient } from "../utils/onesignal.js";
+import NotificationModel from "../models/Notification.js";
+const { Notification } = OneSignalPkg;
 /**
  * @swagger
  * tags:
@@ -65,11 +69,16 @@ import Category from "../models/Category.js";
 
 // ✅ Helper: check access
 async function checkAccess(memberId, ownerId, required) {
+  // ✅ Direct owner always has full access
   if (memberId.equals(ownerId)) return true;
 
   const perm = await FamilyPermission.findOne({ owner_id: ownerId, member_id: memberId });
   if (!perm) return false;
 
+  // ✅ Treat 'owner' permission as full access (read + write)
+  if (perm.permission === "owner") return true;
+
+  // ✅ Handle normal permissions
   if (required === "read" && ["read", "write"].includes(perm.permission)) return true;
   if (required === "write" && perm.permission === "write") return true;
 
@@ -98,40 +107,72 @@ export const getEvents = async (req, res) => {
   try {
     const user = req.user;
 
-    // ✅ Get all owner IDs accessible by this user (including their own)
-    const accessibleOwnerIds = await FamilyPermission.find({ member_id: user._id }).distinct("owner_id");
+    // ✅ Get all permissions where user is a member
+    const familyPerms = await FamilyPermission.find({ member_id: user._id }).lean();
 
-    // ✅ Fetch events for this user and shared owners
+    // Separate accessible owners
+    const ownerIdsWithAccess = familyPerms.map((p) => p.owner_id.toString());
+    const ownerIdsWithFullAccess = familyPerms
+      .filter((p) => p.permission === "owner") // 👑 treat as owner
+      .map((p) => p.owner_id.toString());
+
+    // ✅ Fetch all events (owned or shared)
     const events = await Event.find({
-      user_id: { $in: [user._id, ...accessibleOwnerIds] },
-      is_deleted: false, // exclude soft-deleted events
+      user_id: { $in: [user._id, ...ownerIdsWithAccess] },
+      is_deleted: false,
     })
       .populate("user_id", "fullname email")
-      .populate("category_id", "name status") // ✅ include category name & status
+      .populate("category_id", "name status")
       .sort({ createdAt: -1 })
-      .lean(); // convert to plain JS objects
+      .lean();
 
-    // ✅ Get all event IDs
     const eventIds = events.map((e) => e._id);
 
-    // ✅ Fetch related transactions (exclude soft-deleted)
-    const transactions = await Transaction.find({
+    // ✅ Determine if user is full owner (main or treated)
+    const isMainOwner = !familyPerms.length; // if no permission record → main owner
+    const hasOwnerPermission =
+      isMainOwner ||
+      familyPerms.some((p) => p.permission === "owner") ||
+      ownerIdsWithFullAccess.length > 0;
+
+    // ✅ Fetch transactions
+    let transactionsQuery = {
       event_id: { $in: eventIds },
       deleted_at: null,
-    })
+    };
+
+    // 👁️ If user has only read/write permission → restrict to their own transactions
+    if (!hasOwnerPermission) {
+      transactionsQuery.added_by = user._id;
+    }
+
+    const transactions = await Transaction.find(transactionsQuery)
       .populate("added_by", "fullname email")
       .sort({ createdAt: 1 })
       .lean();
 
-    // ✅ Attach transactions + category name
-    const eventsWithTransactions = events.map((event) => ({
-      ...event,
-      category_name: event.category_id?.name || null, // ✅ Add readable category name
-      category_status: event.category_id?.status ?? null, // optional if you need
-      transactions: transactions.filter(
-        (t) => t.event_id.toString() === event._id.toString()
-      ),
-    }));
+    // ✅ Attach transactions properly
+    const eventsWithTransactions = events.map((event) => {
+      const eventOwnerId = event.user_id._id.toString();
+      const isEventOwner =
+        eventOwnerId === user._id.toString() ||
+        ownerIdsWithFullAccess.includes(eventOwnerId);
+
+      const eventTransactions = hasOwnerPermission
+        ? transactions.filter((t) => t.event_id.toString() === event._id.toString())
+        : transactions.filter(
+          (t) =>
+            t.event_id.toString() === event._id.toString() &&
+            t.added_by._id.toString() === user._id.toString()
+        );
+
+      return {
+        ...event,
+        category_name: event.category_id?.name || null,
+        category_status: event.category_id?.status ?? null,
+        transactions: eventTransactions,
+      };
+    });
 
     res.json(eventsWithTransactions);
   } catch (err) {
@@ -139,7 +180,6 @@ export const getEvents = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
-
 
 
 /**
@@ -790,17 +830,22 @@ export const getSearcCategories = async (req, res) => {
  *       404:
  *         description: Event not found
  */
+
+
 export const addPayment = async (req, res) => {
   try {
     const user = req.user;
     const { amount, payment_method, reference, note } = req.body;
 
+    // 1️⃣ Fetch event
     const event = await Event.findById(req.params.id);
     if (!event) return res.status(404).json({ error: "Event not found" });
 
+    // 2️⃣ Permission check
     const canAdd = await checkAccess(user._id, event.user_id, "write");
     if (!canAdd) return res.status(403).json({ error: "Permission denied" });
 
+    // 3️⃣ Create transaction
     const transaction = await Transaction.create({
       event_id: event._id,
       added_by: user._id,
@@ -810,12 +855,46 @@ export const addPayment = async (req, res) => {
       note,
     });
 
-    res.status(201).json(transaction);
+    // 4️⃣ Create notification message
+    const message = `${user.fullname} added a payment of ₹${amount} for ${event.event_name}.`;
+
+    // 5️⃣ Save DB notifications (optional for future external_id logic)
+    await NotificationModel.create({
+      user_id: event.user_id,
+      title: "New Payment Added",
+      message,
+    });
+
+    // 6️⃣ Send OneSignal notification to all users (temporary)
+    try {
+      const notification = new Notification();
+      notification.app_id = process.env.ONESIGNAL_APP_ID;
+      notification.headings = { en: "New Payment Added" };
+      notification.contents = { en: message };
+
+      // 👇 For now, send to everyone
+      notification.included_segments = ["All"];
+
+      const response = await oneSignalClient.createNotification(notification);
+
+      console.log("✅ OneSignal sent:", response?.id || "Success");
+
+      return res.status(201).json({
+        transaction,
+        message: `Payment added. OneSignal notification sent successfully.`,
+      });
+    } catch (err) {
+      console.error("❌ OneSignal error:", err.response?.body || err.message);
+      return res.status(201).json({
+        transaction,
+        message: `Payment added. OneSignal notification failed.`,
+      });
+    }
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error("❌ addPayment Error:", err);
+    return res.status(400).json({ error: err.message });
   }
 };
-
 /**
  * @swagger
  * /api/events/{id}/payments/{paymentId}:

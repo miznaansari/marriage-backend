@@ -35,4 +35,7 @@ app.post("/api/forget-password/reset", AuthController.forgetPasswordReset);
 app.post("/api/forget-password/request-otp", AuthController.forgetPasswordRequestOtp);
 app.use("/api", eventRoutes);
 
+
+
+
 app.listen(4000, () => console.log("🚀 Server running on http://localhost:4000"));

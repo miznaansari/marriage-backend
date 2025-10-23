@@ -196,42 +196,57 @@ export const signup = async (req, res) => {
  *         description: Account locked
  */
 export const login = async (req, res) => {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) return res.status(401).json({ status: false, message: "Invalid credentials" });
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (!user)
+    return res.status(401).json({ status: false, message: "Invalid credentials" });
 
-    if (user.isLocked()) {
-        return res.status(403).json({
-            status: false,
-            message: `Account is locked. Try again after ${user.locked_until}`,
-        });
-    }
+  if (user.isLocked()) {
+    return res.status(403).json({
+      status: false,
+      message: `Account is locked. Try again after ${user.locked_until}`,
+    });
+  }
 
-    const valid = await user.checkPassword(password);
-    if (!valid) {
-        await user.registerFailedLogin();
-        return res.status(401).json({ status: false, message: "Invalid credentials" });
-    }
+  const valid = await user.checkPassword(password);
+  if (!valid) {
+    await user.registerFailedLogin();
+    return res.status(401).json({ status: false, message: "Invalid credentials" });
+  }
 
-    await user.resetFailedLogins();
+  await user.resetFailedLogins();
 
-    if (user.two_factor_enabled) {
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        await AccountRecoveryOtp.create({
-            identifier: user.email,
-            otp,
-            method: "email",
-            purpose: "2fa",
-            expires_at: new Date(Date.now() + 10 * 60 * 1000),
-        });
-        await sendOtp("email", user.email, otp);
-        return res.json({ status: true, message: "Two-factor OTP sent", "2fa_required": true });
-    }
+  // ✅ Handle 2FA
+  if (user.two_factor_enabled) {
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    await AccountRecoveryOtp.create({
+      identifier: user.email,
+      otp,
+      method: "email",
+      purpose: "2fa",
+      expires_at: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    await sendOtp("email", user.email, otp);
+    return res.json({
+      status: true,
+      message: "Two-factor OTP sent",
+      "2fa_required": true,
+      user_id: user._id, // ✅ Add user_id even for 2FA scenario (optional)
+    });
+  }
 
-    const token = generateToken(user);
-    await UserToken.create({ user_id: user._id, token });
-    res.json({ status: true, token, expires_in: 2592000 });
+  // ✅ Generate token and include user ID
+  const token = generateToken(user);
+  await UserToken.create({ user_id: user._id, token });
+
+  res.json({
+    status: true,
+    token,
+    user_id: user._id, // ✅ Added user ID here
+    expires_in: 2592000,
+  });
 };
+
 
 /**
  * @swagger
