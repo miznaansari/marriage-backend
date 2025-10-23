@@ -311,7 +311,7 @@ export const signupRequest = async (req, res) => {
     if (!fullname || !password)
       return res.status(422).json({ status: false, message: "Name & password required" });
 
-    if (!email && !mobile)
+    if (!email )
       return res.status(422).json({ status: false, message: "Either email or mobile required" });
 
     // 🔍 Check if email or mobile already exists
