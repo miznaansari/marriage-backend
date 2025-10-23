@@ -832,6 +832,72 @@ export const getSearcCategories = async (req, res) => {
  */
 
 
+// export const addPayment = async (req, res) => {
+//   try {
+//     const user = req.user;
+//     const { amount, payment_method, reference, note } = req.body;
+
+//     // 1️⃣ Fetch event
+//     const event = await Event.findById(req.params.id);
+//     if (!event) return res.status(404).json({ error: "Event not found" });
+
+//     // 2️⃣ Permission check
+//     const canAdd = await checkAccess(user._id, event.user_id, "write");
+//     if (!canAdd) return res.status(403).json({ error: "Permission denied" });
+
+//     // 3️⃣ Create transaction
+//     const transaction = await Transaction.create({
+//       event_id: event._id,
+//       added_by: user._id,
+//       amount,
+//       payment_method,
+//       reference,
+//       note,
+//     });
+
+//     // 4️⃣ Create notification message
+//     const message = `${user.fullname} added a payment of ₹${amount} for ${event.event_name}.`;
+
+//     // 5️⃣ Save DB notifications (optional for future external_id logic)
+//     await NotificationModel.create({
+//       user_id: event.user_id,
+//       title: "New Payment Added",
+//       message,
+//     });
+
+//     // 6️⃣ Send OneSignal notification to all users (temporary)
+//     try {
+//       const notification = new Notification();
+//       notification.app_id = process.env.ONESIGNAL_APP_ID;
+//       notification.headings = { en: "New Payment Added" };
+//       notification.contents = { en: message };
+
+//       // 👇 For now, send to everyone
+//       notification.included_segments = ["All"];
+
+//       const response = await oneSignalClient.createNotification(notification);
+
+//       console.log("✅ OneSignal sent:", response?.id || "Success");
+
+//       return res.status(201).json({
+//         transaction,
+//         message: `Payment added. OneSignal notification sent successfully.`,
+//       });
+//     } catch (err) {
+//       console.error("❌ OneSignal error:", err.response?.body || err.message);
+//       return res.status(201).json({
+//         transaction,
+//         message: `Payment added. OneSignal notification failed.`,
+//       });
+//     }
+//   } catch (err) {
+//     console.error("❌ addPayment Error:", err);
+//     return res.status(400).json({ error: err.message });
+//   }
+// };
+
+
+
 export const addPayment = async (req, res) => {
   try {
     const user = req.user;
@@ -858,36 +924,78 @@ export const addPayment = async (req, res) => {
     // 4️⃣ Create notification message
     const message = `${user.fullname} added a payment of ₹${amount} for ${event.event_name}.`;
 
-    // 5️⃣ Save DB notifications (optional for future external_id logic)
-    await NotificationModel.create({
-      user_id: event.user_id,
-      title: "New Payment Added",
-      message,
-    });
+    // 5️⃣ Find all users who should get the notification
+    const familyMembers = await FamilyPermission.find({
+      owner_id: event.user_id,
+      permission: { $in: ["owner", "write"] }, // 👈 send to all co-owners/writers
+    }).select("member_id");
 
-    // 6️⃣ Send OneSignal notification to all users (temporary)
+    // Combine owner + permitted members (unique)
+    // Combine owner + permitted members
+    const userIdsToNotify = [
+      event.user_id.toString(),
+      ...familyMembers.map((f) => f.member_id.toString()),
+    ];
+
+    // Remove duplicates AND exclude the current user
+    const uniqueUserIds = [...new Set(userIdsToNotify)].filter(
+      (uid) => uid !== user._id.toString()
+    );
+
+    console.log("Users to notify (excluding sender):", uniqueUserIds);
+
+
+    // 6️⃣ Store in DB notifications
+    await NotificationModel.insertMany(
+      uniqueUserIds.map((uid) => ({
+        user_id: uid,
+        title: "New Payment Added",
+        message,
+      }))
+    );
+
+    // 7️⃣ Send OneSignal notification
     try {
+
       const notification = new Notification();
       notification.app_id = process.env.ONESIGNAL_APP_ID;
       notification.headings = { en: "New Payment Added" };
       notification.contents = { en: message };
+      notification.include_aliases = {
+        external_id: uniqueUserIds  // array of user IDs
+      };
+      notification.target_channel = "push";  // REQUIRED when using include_aliases
 
-      // 👇 For now, send to everyone
-      notification.included_segments = ["All"];
+      try {
+        const response = await oneSignalClient.createNotification(notification);
 
-      const response = await oneSignalClient.createNotification(notification);
+        console.log("✅ Notification ID:", response.id);
+        console.log("📊 Recipients:", response.recipients || 0);
 
-      console.log("✅ OneSignal sent:", response?.id || "Success");
+        // If you have errors in the response
+        if (response.errors) {
+          console.log("❌ Errors:", response.errors);
+        }
+
+        // To get detailed delivery stats, use View Message API
+        // Wait a few seconds for processing, then:
+        // GET https://onesignal.com/api/v1/notifications/{response.id}?app_id={YOUR_APP_ID}
+
+      } catch (error) {
+        console.error("❌ Failed to send:", error);
+      }
 
       return res.status(201).json({
         transaction,
-        message: `Payment added. OneSignal notification sent successfully.`,
+        notified_users: uniqueUserIds,
+        message: `Payment added & notifications sent successfully.`,
       });
     } catch (err) {
       console.error("❌ OneSignal error:", err.response?.body || err.message);
       return res.status(201).json({
         transaction,
-        message: `Payment added. OneSignal notification failed.`,
+        notified_users: uniqueUserIds,
+        message: `Payment added but OneSignal notification failed.`,
       });
     }
   } catch (err) {
@@ -895,6 +1003,7 @@ export const addPayment = async (req, res) => {
     return res.status(400).json({ error: err.message });
   }
 };
+
 /**
  * @swagger
  * /api/events/{id}/payments/{paymentId}:
