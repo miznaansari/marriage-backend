@@ -142,7 +142,6 @@ export const getEvents = async (req, res) => {
 
 
 
-
 /**
  * @swagger
  * /api/events:
@@ -176,6 +175,10 @@ export const getEvents = async (req, res) => {
  *               category_name:
  *                 type: string
  *                 description: Name of the category (e.g. "Home Care")
+ *               priority:
+ *                 type: string
+ *                 enum: [low, medium, high]
+ *                 description: Priority level of the event
  *     responses:
  *       201:
  *         description: Event created successfully
@@ -194,6 +197,7 @@ export const createEvent = async (req, res) => {
       payment_method = null,
       notes = null,
       category_name,
+      priority = "medium", // ✅ added
     } = req.body;
 
     // ✅ Validation
@@ -237,6 +241,12 @@ export const createEvent = async (req, res) => {
         .json({ error: "category_name is required and must be a string" });
     }
 
+    // ✅ Validate priority
+    const validPriorities = ["low", "medium", "high"];
+    if (!validPriorities.includes(priority)) {
+      return res.status(422).json({ error: "priority must be one of: low, medium, high" });
+    }
+
     // ✅ Determine event owner (if member, use owner's ID)
     let ownerId = user._id;
     const familyPermission = await FamilyPermission.findOne({ member_id: user._id });
@@ -266,7 +276,7 @@ export const createEvent = async (req, res) => {
       });
     }
 
-    // ✅ Create Event
+    // ✅ Create Event with priority
     const event = await Event.create({
       user_id: ownerId,
       event_name,
@@ -277,6 +287,7 @@ export const createEvent = async (req, res) => {
       notes,
       category_id: category._id,
       created_by: user._id,
+      priority, // ✅ added
     });
 
     // ✅ Create Transaction if advance_payment > 0
@@ -300,6 +311,7 @@ export const createEvent = async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 };
+
 
 /**
  * @swagger

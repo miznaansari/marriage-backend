@@ -16,8 +16,15 @@ const eventSchema = new mongoose.Schema(
     // ✅ Creator
     created_by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
-    // ✅ Event status (example meaning)
+    // ✅ Event status
     status: { type: Number, enum: [0, 1, 2], default: 1 }, // 0 = draft, 1 = active, 2 = completed
+
+    // ✅ Priority level
+    priority: {
+      type: String,
+      enum: ["low", "medium", "high"], // fixed allowed values
+      default: "medium",
+    },
 
     // ✅ Soft delete fields
     is_deleted: { type: Boolean, default: false },
