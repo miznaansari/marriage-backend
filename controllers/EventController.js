@@ -311,7 +311,107 @@ export const createEvent = async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 };
+/**
+ * @swagger
+ * /api/events/{id}/update:
+ *   put:
+ *     summary: Update status or priority (or both) of an event
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: Event ID
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status:
+ *                 type: number
+ *                 enum: [0, 1, 2]
+ *                 description: "0 = pending, 1 = active, 2 = completed"
+ *               priority:
+ *                 type: string
+ *                 enum: [low, medium, high]
+ *     responses:
+ *       200:
+ *         description: Event updated successfully
+ *       400:
+ *         description: Nothing to update
+ *       403:
+ *         description: Access denied
+ *       404:
+ *         description: Event not found
+ */
+export const updateEventStatusPriority = async (req, res) => {
+  try {
+    const user = req.user;
+    const { id } = req.params;
+    const { status, priority } = req.body;
 
+    // ✅ Ensure at least one field is provided
+    if (status === undefined && priority === undefined) {
+      return res.status(400).json({
+        error: "Please provide at least one field to update: status or priority",
+      });
+    }
+
+    // ✅ Validate inputs
+    const validStatus = [0, 1, 2];
+    const validPriorities = ["low", "medium", "high"];
+
+    if (status !== undefined && !validStatus.includes(Number(status))) {
+      return res.status(422).json({ error: "Invalid status (must be 0, 1, or 2)" });
+    }
+
+    if (priority !== undefined && !validPriorities.includes(priority)) {
+      return res.status(422).json({ error: "Invalid priority (must be low, medium, or high)" });
+    }
+
+    // ✅ Determine event owner (handle family access)
+    let ownerId = user._id;
+    const familyPermission = await FamilyPermission.findOne({ member_id: user._id });
+    if (familyPermission) {
+      ownerId = familyPermission.owner_id;
+    }
+
+    // ✅ Access check
+    const hasWriteAccess = await checkAccess(user._id, ownerId, "write");
+    if (!hasWriteAccess) {
+      return res
+        .status(403)
+        .json({ error: "You do not have permission to update this event (read-only access)" });
+    }
+
+    // ✅ Find event and ensure ownership
+    const event = await Event.findOne({ _id: id, user_id: ownerId });
+    if (!event) {
+      return res.status(404).json({ error: "Event not found or access denied" });
+    }
+
+    // ✅ Update only provided fields
+    if (status !== undefined) event.status = status;
+    if (priority !== undefined) event.priority = priority;
+
+    event.updated_by = user._id; // optional audit
+    await event.save();
+
+    res.status(200).json({
+      message: "Event updated successfully",
+      event,
+    });
+  } catch (error) {
+    console.error("Error updating event:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
 
 /**
  * @swagger
