@@ -116,24 +116,32 @@ export const getEvents = async (req, res) => {
       .filter((p) => p.permission === "owner") // 👑 treat as owner
       .map((p) => p.owner_id.toString());
 
-    // ✅ Fetch all events (owned or shared)
-    const events = await Event.find({
-      user_id: { $in: [user._id, ...ownerIdsWithAccess] },
-      is_deleted: false,
-    })
-      .populate("user_id", "fullname email")
-      .populate("category_id", "name status")
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const eventIds = events.map((e) => e._id);
-
     // ✅ Determine if user is full owner (main or treated)
     const isMainOwner = !familyPerms.length; // if no permission record → main owner
     const hasOwnerPermission =
       isMainOwner ||
       familyPerms.some((p) => p.permission === "owner") ||
       ownerIdsWithFullAccess.length > 0;
+
+    // ✅ Build query for events
+    const eventsQuery = {
+      user_id: { $in: [user._id, ...ownerIdsWithAccess] },
+      is_deleted: false,
+    };
+
+    // 👁️ If user is not owner, exclude draft events (status: 0)
+    if (!hasOwnerPermission) {
+      eventsQuery.status = { $ne: 0 };
+    }
+
+    // ✅ Fetch all events (owned or shared)
+    const events = await Event.find(eventsQuery)
+      .populate("user_id", "fullname email")
+      .populate("category_id", "name status")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const eventIds = events.map((e) => e._id);
 
     // ✅ Fetch transactions
     let transactionsQuery = {
@@ -151,7 +159,7 @@ export const getEvents = async (req, res) => {
       .sort({ createdAt: 1 })
       .lean();
 
-    // ✅ Attach transactions properly
+    // ✅ Attach transactions properly & mask sensitive fields for read/write users
     const eventsWithTransactions = events.map((event) => {
       const eventOwnerId = event.user_id._id.toString();
       const isEventOwner =
@@ -161,13 +169,20 @@ export const getEvents = async (req, res) => {
       const eventTransactions = hasOwnerPermission
         ? transactions.filter((t) => t.event_id.toString() === event._id.toString())
         : transactions.filter(
-          (t) =>
-            t.event_id.toString() === event._id.toString() &&
-            t.added_by._id.toString() === user._id.toString()
-        );
+            (t) =>
+              t.event_id.toString() === event._id.toString() &&
+              t.added_by._id.toString() === user._id.toString()
+          );
+
+      // 🛡 Mask sensitive fields if user is not an owner
+      const maskedEvent = { ...event };
+      if (!hasOwnerPermission) {
+        delete maskedEvent.advance_payment;
+        delete maskedEvent.booking_total_value;
+      }
 
       return {
-        ...event,
+        ...maskedEvent,
         category_name: event.category_id?.name || null,
         category_status: event.category_id?.status ?? null,
         transactions: eventTransactions,
@@ -445,36 +460,36 @@ export const createEvent = async (req, res) => {
     // -------------------------------
     // 🔔 OneSignal Notification Setup
     // -------------------------------
- const messageParts = [];
+    const messageParts = [];
 
-// Map numeric status to text
-const statusMap = {
-  0: "inactive",
-  1: "pending",
-  2: "completed",
-};
+    // Map numeric status to text
+    const statusMap = {
+      0: "inactive",
+      1: "pending",
+      2: "completed",
+    };
 
-// Add status part
-if (status !== undefined) {
-  const statusText = statusMap[status] || status;
-  if (status === 2) {
-    messageParts.push(`completed the event`);
-  } else if (status === 1) {
-    messageParts.push(`marked as pending`);
-  } else if (status === 0) {
-    messageParts.push(`set to inactive`);
-  } else {
-    messageParts.push(`status updated to ${statusText}`);
-  }
-}
+    // Add status part
+    if (status !== undefined) {
+      const statusText = statusMap[status] || status;
+      if (status === 2) {
+        messageParts.push(`completed the event`);
+      } else if (status === 1) {
+        messageParts.push(`marked as pending`);
+      } else if (status === 0) {
+        messageParts.push(`set to inactive`);
+      } else {
+        messageParts.push(`status updated to ${statusText}`);
+      }
+    }
 
-// Add priority part
-if (priority !== undefined) {
-  messageParts.push(`priority set to ${priority}`);
-}
+    // Add priority part
+    if (priority !== undefined) {
+      messageParts.push(`priority set to ${priority}`);
+    }
 
-// Final message
-const message = `${user.fullname} ${event.event_name}: ${messageParts.join(", ")}.`;
+    // Final message
+    const message = `${user.fullname} ${event.event_name}: ${messageParts.join(", ")}.`;
     // Find all users who should get the notification
     const familyMembers = await FamilyPermission.find({
       owner_id: event.user_id,
@@ -511,15 +526,25 @@ const message = `${user.fullname} ${event.event_name}: ${messageParts.join(", ")
       notification.headings = { en: "Event Status Changes" };
       notification.contents = { en: message };
       notification.include_aliases = {
-        external_id: uniqueUserIds  // array of user IDs
+        external_id: uniqueUserIds
       };
-      notification.target_channel = "push";  // REQUIRED when using include_aliases
+      notification.target_channel = "push";
+
+      // ✅ Add custom data for Android/iOS/Web
+      notification.data = {
+        event_id: event._id,
+        updated_by: user.name,
+        new_status: status,
+        timestamp: new Date().toISOString(),
+      };
 
       try {
         const response = await oneSignalClient.createNotification(notification);
 
         console.log("✅ Notification ID:", response.id);
         console.log("📊 Recipients:", response.recipients || 0);
+
+
 
         // If you have errors in the response
         if (response.errors) {
@@ -535,7 +560,7 @@ const message = `${user.fullname} ${event.event_name}: ${messageParts.join(", ")
       }
 
       return res.status(201).json({
-        transaction,
+        event,
         notified_users: uniqueUserIds,
         message: `Payment added & notifications sent successfully.`,
       });
