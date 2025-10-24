@@ -169,10 +169,10 @@ export const getEvents = async (req, res) => {
       const eventTransactions = hasOwnerPermission
         ? transactions.filter((t) => t.event_id.toString() === event._id.toString())
         : transactions.filter(
-          (t) =>
-            t.event_id.toString() === event._id.toString() &&
-            t.added_by._id.toString() === user._id.toString()
-        );
+            (t) =>
+              t.event_id.toString() === event._id.toString() &&
+              t.added_by._id.toString() === user._id.toString()
+          );
 
       // 🛡 Mask sensitive fields if user is not an owner
       const maskedEvent = { ...event };
@@ -518,43 +518,59 @@ export const createEvent = async (req, res) => {
       }))
     );
 
-
     // Send OneSignal notification
     try {
-      const notification = {
-        app_id: process.env.ONESIGNAL_APP_ID,
-        headings: { en: "Event Status Changed" },
-        contents: { en: message }, // ✅ must include 'contents'
-        include_aliases: {
-          external_id: uniqueUserIds, // ✅ must be an array of strings
-        },
-        target_channel: "push",
 
-        // ✅ Include icon & image to help Android render properly
-        large_icon: "https://mizna.theclevar.com/icon-192.png",
-        small_icon: "https://mizna.theclevar.com/icon-96.png",
-        android_channel_id: "your-android-channel-id", // optional but recommended
+      const notification = new Notification();
+      notification.app_id = process.env.ONESIGNAL_APP_ID;
+      notification.headings = { en: "Event Status Changes" };
+      notification.contents = { en: message };
+      notification.include_aliases = {
+        external_id: uniqueUserIds
+      };
+      notification.target_channel = "push";
 
-        // ✅ Add custom data (retrievable in service-worker.js)
-        data: {
-          event_id: event._id,
-          updated_by: user.name,
-          new_status: status,
-          timestamp: new Date().toISOString(),
-          url: `/events/${event._id}` // opens on click
-        },
+      // ✅ Add custom data for Android/iOS/Web
+      notification.data = {
+        event_id: event._id,
+        updated_by: user.name,
+        new_status: status,
+        timestamp: new Date().toISOString(),
       };
 
-      const response = await oneSignalClient.createNotification(notification);
+      try {
+        const response = await oneSignalClient.createNotification(notification);
 
-      console.log("✅ Notification sent:", response.id);
-      console.log("📊 Recipients:", response.recipients || 0);
+        console.log("✅ Notification ID:", response.id);
+        console.log("📊 Recipients:", response.recipients || 0);
 
-      if (response.errors) {
-        console.error("❌ OneSignal Errors:", response.errors);
+
+
+        // If you have errors in the response
+        if (response.errors) {
+          console.log("❌ Errors:", response.errors);
+        }
+
+        // To get detailed delivery stats, use View Message API
+        // Wait a few seconds for processing, then:
+        // GET https://onesignal.com/api/v1/notifications/{response.id}?app_id={YOUR_APP_ID}
+
+      } catch (error) {
+        console.error("❌ Failed to send:", error);
       }
+
+      return res.status(201).json({
+        event,
+        notified_users: uniqueUserIds,
+        message: `Payment added & notifications sent successfully.`,
+      });
     } catch (err) {
-      console.error("❌ OneSignal API error:", err);
+      console.error("❌ OneSignal error:", err.response?.body || err.message);
+      return res.status(201).json({
+        event,
+        notified_users: uniqueUserIds,
+        message: `Payment added but OneSignal notification failed.`,
+      });
     }
 
     // -------------------------------
