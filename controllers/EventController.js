@@ -533,7 +533,7 @@ export const createEvent = async (req, res) => {
         // ✅ Include icon & image to help Android render properly
         large_icon: "https://mizna.theclevar.com/icon-192.png",
         small_icon: "https://mizna.theclevar.com/icon-96.png",
-        android_channel_id: "your-android-channel-id", // optional but recommended
+        // android_channel_id: "your-android-channel-id", // optional but recommended
 
         // ✅ Add custom data (retrievable in service-worker.js)
         data: {
